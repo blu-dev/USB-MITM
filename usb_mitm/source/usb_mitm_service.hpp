@@ -7,9 +7,6 @@
 #define AMS_USB_MITM_INTERFACE_INFO(C, H)                                                                                                                                                         \
     AMS_SF_METHOD_INFO(C, H, 7, Result, AcquireUsbIf, (const sf::OutMapAliasBuffer &out1, const sf::OutMapAliasBuffer &out2, sf::Out<sf::SharedPointer<::ams::usb::IClientIfSession>> out_session, u32 interfaceId), (out1, out2, out_session, interfaceId))
 
-    // AMS_SF_METHOD_INFO(C, H, 1, Result, QueryAllInterfaces, (UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterfaceInfo> &out, sf::Out<s32> total_out), (filter, out, total_out)) 
-    // AMS_SF_METHOD_INFO(C, H, 2, Result, QueryAvailableInterfaces, (UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterfaceInfo> &out, sf::Out<s32> total_out), (filter, out, total_out))
-
 #define AMS_USB_CLIENT_IF_INTERFACE_INFO(C, H) \
     AMS_SF_METHOD_INFO(C, H, 0, Result, GetStateChangeEvent, (sf::OutCopyHandle out), (out)) \
     AMS_SF_METHOD_INFO(C, H, 1, Result, SetInterface, (const sf::OutBuffer &out, u8 id), (out, id)) \

@@ -9,7 +9,7 @@ namespace usb::util
     static long s_LogFilePosition = 0;
     static ams::fs::FileHandle s_LogFileHandle;
 
-    static constexpr bool s_Enabled = false;
+    static constexpr bool s_Enabled = true;
 
 #define CHECK_ENABLED()       \
     if constexpr (!s_Enabled) \

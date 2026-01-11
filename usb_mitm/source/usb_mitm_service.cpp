@@ -41,7 +41,6 @@ namespace ams::mitm::usb
 
     Result UsbMitmEpSession::GetCompletionEvent(sf::OutCopyHandle out)
     {
-        ::usb::util::Log("GetCompletionEvent\n");
         out.SetValue(this->mCompletionEvent, false);
         R_SUCCEED();
     }
@@ -59,24 +58,18 @@ namespace ams::mitm::usb
         xferId.SetValue(0);
         if (this->mIsWriteEndpoint) 
         {
-            ::usb::util::Log("WritePacket\n");
-            ::usb::gc::WritePacket(mIntfId, buffer, size);
+            ::usb::gc::WritePacket(mIntfId, buffer, size, &mReport);
         }
         else
         {
-            ::usb::util::Log("ReadPacket\n");
-            ::usb::gc::ReadPacket(mIntfId, buffer, size);
+            ::usb::gc::ReadPacket(mIntfId, buffer, size, &mReport);
         }
-        mReport.res = 0;
-        mReport.transferredSize = size;
-        mReport.requestedSize = size;
 
         R_SUCCEED();
     }
 
     Result UsbMitmEpSession::GetXferReport(const sf::OutAutoSelectBuffer &out, sf::Out<u32> count, u32 max)
     {
-        ::usb::util::Log("GetXferReport\n");
         if (max == 0)
         {
             count.SetValue(0);
@@ -88,7 +81,6 @@ namespace ams::mitm::usb
 
         AMS_UNUSED(out, max);
         count.SetValue(1);
-        STUB_LOG();
         R_SUCCEED();
     }
 
@@ -117,12 +109,13 @@ namespace ams::mitm::usb
 namespace ams::mitm::usb
 {
     UsbMitmIfSession::~UsbMitmIfSession() {
+        DEBUG("UsbMitmIfSession[%u]::~UsbMitmIfSession()\n", mProxy.mId);
         ::usb::gc::CloseInterface(mProxy.mId);
     }
 
     Result UsbMitmIfSession::GetStateChangeEvent(sf::OutCopyHandle out)
     {
-        ::usb::util::Log("UsbMitmIfSession::GetStateChangeEvent\n");
+        DEBUG("UsbMitmIfSession[%u]::GetStateChangeEvent()\n", mProxy.mId);
         out.SetValue(mProxy.mIfStateChangeEvent, false);
         R_SUCCEED();
     }
@@ -148,8 +141,8 @@ namespace ams::mitm::usb
     }
     Result UsbMitmIfSession::CtrlXferAsync(u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, u16 wLength, u64 buffer)
     {
-        /* Map the client memory into our buffer space for this endpoint */
-        ::usb::util::Log("CtrlXferAsync{%x,%x,%x,%x,%x,%llx}\n", bmRequestType, bRequest, wValue, wIndex, wLength, buffer);
+        DEBUG("UsbMitmIfSession[%u]::CtrlXferAsync(%x, %x, %x, %x, %x, %llx):\n", mProxy.mId, bmRequestType, bRequest, wValue, wIndex, wLength, buffer);
+
         ::usb::gc::IntfAsyncTransfer(mProxy.mId, {
             .mpReport = &mFakedReport,
             .mClientBuffer = buffer,
@@ -164,13 +157,13 @@ namespace ams::mitm::usb
     }
     Result UsbMitmIfSession::GetCtrlXferCompletionEvent(sf::OutCopyHandle out)
     {
-        ::usb::util::Log("GetCtrlXferCompletionEvent\n");
+        DEBUG("UsbMitmIfSession[%u]::GetCtrlXferCompletionEvent()\n", mProxy.mId);
         out.SetValue(mProxy.mCtrlXferCompletionEvent, false);
         R_SUCCEED();
     }
     Result UsbMitmIfSession::GetCtrlXferReport(const sf::OutBuffer &out)
     {
-        ::usb::util::Log("GetCtrlXferReport\n");
+        DEBUG("UsbMitmIfSession[%u]::GetCtrlXferReport(): { .res = %x, .requestedSize = %x, .transferredSize = %x }\n", mProxy.mId, mFakedReport.res, mFakedReport.requestedSize, mFakedReport.transferredSize);
         *reinterpret_cast<UsbHsXferReport*>(out.GetPointer()) = mFakedReport;
         R_SUCCEED();
     }
@@ -180,9 +173,18 @@ namespace ams::mitm::usb
     }
     Result UsbMitmIfSession::OpenUsbEp(sf::Out<sf::SharedPointer<::ams::usb::IClientEpSession>> out_session, sf::Out<usb_endpoint_descriptor> out_desc, u16 maxUrbCount, u32 epType, u32 epNumber, u32 epDirection, u32 maxXferSize)
     {
-        ::usb::util::Log("OpenUsbEp\n");
+        DEBUG("UsbMitmIfSession[%u]::OpenUsb(%x, %x, %x, %x, %x):\n", mProxy.mId, maxUrbCount, epType, epNumber, epDirection, maxXferSize);
         AMS_UNUSED(out_desc, maxUrbCount, epType, epNumber, epDirection, maxXferSize);
         bool IsWriteEndpoint = epDirection == 1;
+        if (IsWriteEndpoint)
+        {
+            DEBUG("\tOpening write endpoint to GameCube adapter %u\n", mProxy.mId);
+        }
+        else
+        {
+            DEBUG("\tOpening read endpoint to GameCube adapter %u\n", mProxy.mId);
+        }
+
         out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientEpSession, UsbMitmEpSession>(
             std::addressof(g_SfAllocator),
             mClientProcess, mProxy.mId, IsWriteEndpoint ? mProxy.mWritePostBufferCompletionEvent : mProxy.mReadPostBufferCompletionEvent, IsWriteEndpoint
@@ -216,27 +218,38 @@ namespace ams::mitm::usb
     UsbMitmService::UsbMitmService(std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c)
         : MitmServiceImplBase(std::move(s), c)
     {
+        DEBUG("UsbMitmService::UsbMitmService():\n");
+        DEBUG("\tConnecting to pm:dmnt\n");
         R_ABORT_UNLESS(pmdmntInitialize());
 
         ams::ncm::ProgramLocation DummyLocation;
         ams::cfg::OverrideStatus DummyStatus;
+        DEBUG("\tGetting client process info\n");
         R_ABORT_UNLESS(ams::pm::dmnt::AtmosphereGetProcessInfo(&mClientProcess, &DummyLocation, &DummyStatus, c.process_id));
+        DEBUG("\tAcquired process client info. Client handle is %x\n", mClientProcess);
         pmdmntExit();
     }
 
     Result UsbMitmService::AcquireUsbIf(const sf::OutMapAliasBuffer &out1, const sf::OutMapAliasBuffer &out2, sf::Out<sf::SharedPointer<::ams::usb::IClientIfSession>> out_session, u32 interfaceId)
     {
+        DEBUG("UsbMitmService::AcquireUsbIf()\n");
         UsbHsInterface QueryInterfaces[4];
 
         s32 NumOut;
 
-        R_TRY(usbHsQueryAvailableInterfacesFwd(
+        Result res = usbHsQueryAvailableInterfacesFwd(
             m_forward_service.get(),
             &GameCubeFilter,
             QueryInterfaces,
             4,
             &NumOut
-        ));
+        );
+
+        if (AMS_UNLIKELY(R_FAILED(res)))
+        {
+            DEBUG("\tFailed to acquire available interfaces to compare GameCube adapter to, forwarding request to usb:hs\n");
+            return sm::mitm::ResultShouldForwardToSession();
+        }
 
         bool IsAcquiringGameCubeAdapter = false;
         s32 i = 0;
@@ -247,11 +260,17 @@ namespace ams::mitm::usb
             }
         }
 
-        R_UNLESS(IsAcquiringGameCubeAdapter, sm::mitm::ResultShouldForwardToSession());
+        if (!IsAcquiringGameCubeAdapter)
+        {
+            DEBUG("\tClient did not attempt to acquire GameCube Adapter, forwarding request to usb:hs service\n");
+            return sm::mitm::ResultShouldForwardToSession();
+        }
+
+        DEBUG("\tClient is attempting to acquire GameCube Adapter, redirecting request to usb:hs:a service with our process\n");
 
         /* We need to trick the process into thinking that we are the session driver for a very brief moment */
         Service IfSession;
-        Result res = usbHsAcquireUsbIfFwd(
+        res = usbHsAcquireUsbIfFwd(
             &g_ProxyUsbService, &IfSession,
             out1.GetPointer(), out1.GetSize(),
             out2.GetPointer(), out2.GetSize(),
@@ -260,25 +279,41 @@ namespace ams::mitm::usb
 
         if (R_SUCCEEDED(res))
         {
+            DEBUG("\tSuccessfully acquired the GameCube Adapter via usb:hs:a service, sending device to driver thread\n");
             ::usb::gc::ProxyInterface proxy = ::usb::gc::OpenInterface(mClientProcess, IfSession, &QueryInterfaces[i]);
             out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, UsbMitmIfSession>(std::addressof(g_SfAllocator), mClientProcess, proxy));
+            R_SUCCEED();
         }
-
-        R_FUNCTION_LOG(res);
-
-        return res;
+        else
+        {
+            DEBUG("\tAcquiring USB device failed, forwarding to usb:hs session so that the device still works\n");
+            return sm::mitm::ResultShouldForwardToSession();
+        }
     }
 
     void Initialize() {
+        DEBUG("ams::mitm::usb::Initialize():\n");
         ams::os::NativeHandle UsbHandle;
+
+        /* We connect to usb:hs:a since the GameCube adapter is only acquired through usb:hs when done in HID */
+        /* This allows us to proxy the USB device packets */
+        DEBUG("\tConnecting to the usb:hs:a service\n");
         R_ABORT_UNLESS(ams::sm::GetServiceHandle(&UsbHandle, ams::sm::ServiceName::Encode("usb:hs:a")));
+
         serviceCreate(&g_ProxyUsbService, UsbHandle);
+
         R_ABORT_UNLESS(serviceConvertToDomain(&g_ProxyUsbService));
         serviceAssumeDomain(&g_ProxyUsbService);
+
+        DEBUG("\tRegistering with usb:hs:a service\n");
         R_ABORT_UNLESS(serviceDispatch(&g_ProxyUsbService, 0, .in_num_handles = 1, .in_handles { CUR_PROCESS_HANDLE }));
+
+        DEBUG("\tConnected and registered with usb:hs:a\n");
 
         g_HeapHandle = lmem::CreateExpHeap(g_HeapMemory, g_HeapMemorySize, lmem::CreateOption_ThreadSafe);
         AMS_ABORT_UNLESS(g_HeapHandle != nullptr);
         g_SfAllocator.Attach(g_HeapHandle);
+
+        DEBUG("\tCreated heap for service objects\n");
     }
 }

@@ -40,6 +40,9 @@ namespace usb::gc
             IntfAsyncXfer mPendingXfers[g_MaxAsyncXfers];
             u32 mNumPending;
 
+            UsbHsXferReport mLatestWriteReport;
+            UsbHsXferReport mLatestReadReport;
+
             bool mHasStarted;
             bool mIsAcquired;
             bool mIsRequestShutdown;
@@ -111,6 +114,8 @@ namespace usb::gc
                 AMS_ABORT_UNLESS(mReadDescriptor.bEndpointAddress == 0x81);
                 AMS_ABORT_UNLESS(mWriteDescriptor.bEndpointAddress == 0x2);
 
+                mLatestReadReport.xferId = UINT32_MAX;
+                mLatestWriteReport.xferId = UINT32_MAX;
                 mNumPending = 0;
                 mHasStarted = false;
                 mIsAcquired = true;
@@ -128,8 +133,8 @@ namespace usb::gc
                 svcCloseHandle(mCompletionEvents[CompletionEventId::ReadEndpoint]);
                 svcCloseHandle(mCompletionEvents[CompletionEventId::Interface]);
 
-                R_ABORT_UNLESS(usbHsEpCloseFwd(&mWriteEpSession));
-                R_ABORT_UNLESS(usbHsEpCloseFwd(&mReadEpSession));
+                // R_ABORT_UNLESS(usbHsEpCloseFwd(&mWriteEpSession));
+                // R_ABORT_UNLESS(usbHsEpCloseFwd(&mReadEpSession));
 
                 serviceClose(&mWriteEpSession);
                 serviceClose(&mReadEpSession);
@@ -211,12 +216,16 @@ namespace usb::gc
             u32 EnabledInterfaces[g_MaxSupportedAdapters] = { 0 };
             u32 EnabledIntfCount = 0;
 
+            DEBUG("[DriverThread::Driver] Initializing thread\n");
+
             ams::os::InitializeMultiWait(&Waiter);
 
             /* Wait for the first time an interface update is requested */
             /* After this initial wait, this event gets added to a multi-wait list */
+            DEBUG("[DriverThread::Driver] Waiting for first interface request\n");
             ams::os::WaitEvent(&g_InterfaceUpdateRequested);
             while (true) {
+                DEBUG("[DriverThread::Driver] Interface state change requested, reconstructing async waiters\n");
                 /* We clear the event explicitly (and declare it without autoclear) */
                 /* This is because when the event gets signaled from a MultiWait it does not clear even if autoclear is set */
                 ams::os::ClearEvent(&g_InterfaceUpdateRequested);
@@ -235,10 +244,14 @@ namespace usb::gc
 
                 /* If we currently don't have any interfaces, then restart the loop waiting for the next update event */
                 if (EnabledIntfCount == 0) {
+                    DEBUG("[DriverThread::Driver] No enabled interfaces, waiting until another interface request\n");
                     ams::os::WaitEvent(&g_InterfaceUpdateRequested);
                     continue;
                 }
 
+                DEBUG("[DriverThread::Driver] There are %u enabled interfaces\n", EnabledIntfCount);
+
+                DEBUG("[DriverThread::Driver] Cleaning up previous waiter\n");
                 /* Initialize our MultiWait holder again */
                 ams::os::UnlinkAllMultiWaitHolder(&Waiter);
                 for (u32 i = 0; i < WaitHolderCount; i++)
@@ -246,6 +259,7 @@ namespace usb::gc
                     ams::os::FinalizeMultiWaitHolder(&WaitHolders[i]);
                 }
 
+                DEBUG("[DriverThread::Driver] Initializing new waiter\n");
                 /* Reinitialize our first event (InterfaceChangeRequested) */
                 /* TODO: Abstract this into a struct with an associated method since this is very easy to make mistakes on */
                 WaitHolderCount = 0;
@@ -266,6 +280,7 @@ namespace usb::gc
                     /* TODO: Should this really be handled here? I don't know, maybe we just allow the HID service to send this */
                     if (!g_Interfaces[IntfId].mHasStarted)
                     {
+                        DEBUG("[DriverThread::Driver] Adapter interface %u has not yet started, sending initialization packet and requesting read\n", IntfId);
                         u32 dummy;
                         R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(
                             &g_Interfaces[IntfId].mWriteEpSession,
@@ -309,6 +324,7 @@ namespace usb::gc
                     /* We only add one pending async xfer at a time since 1.) the HID service does not stack these, and 2.) we only have so many memory regions available */
                     if (g_Interfaces[IntfId].mNumPending > 0)
                     {
+                        DEBUG("[DriverThread::Driver] Adapter interface %u has %u pending async transfer requests, processing the first one\n", IntfId, g_Interfaces[IntfId].mNumPending);
                         WaitHolderDatas[WaitHolderCount] = (WaitHolderData){
                             .mKind = WaitHolderData::Kind::InterfaceOperationFinished,
                             .mIntfId = IntfId,
@@ -327,11 +343,11 @@ namespace usb::gc
                     ams::os::MultiWaitHolderType* pSignaled = ams::os::WaitAny(&Waiter);
 
                     WaitHolderData* pUserData = reinterpret_cast<WaitHolderData*>(ams::os::GetMultiWaitHolderUserData(pSignaled));
-                    // ::usb::util::Log("Event Signaled (kind %d)\n", pUserData->mKind);
                     switch (pUserData->mKind)
                     {
                         /* If the client did something that would indicate a change in interface, we need to restart our loop */
                         case WaitHolderData::Kind::InterfaceChangeRequested: 
+                        DEBUG("[DriverThread::Driver] Waiter signaled with interface state change, reinitializing the thread variables\n");
                         NeedsBreak = true;
                         break;
 
@@ -362,13 +378,53 @@ namespace usb::gc
                                 NeedsBreak = true;
                                 break;
                             case ProxyInterfaceImpl::CompletionEventId::ReadEndpoint:
-                                /* Do nothing except request another read */
-                                R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(&pIntf->mReadEpSession, MemoryForInterface(pUserData->mIntfId, true), 37, 0, &dummy));
+                                /* Do nothing except request another read, but only if the xfer was successful (an error here will cause a deadlock) */
+                                R_ABORT_UNLESS(usbHsEpGetXferReportFwd(&pIntf->mReadEpSession, &pIntf->mLatestReadReport, 1, &dummy));
+                                if (AMS_UNLIKELY(dummy != 1))
+                                {
+                                    DEBUG("[DriverThread::Driver] Unable to get xfer report for latest read for adapter interface %u, not-continuing read operations\n", pUserData->mIntfId);
+                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mReadEpSession));
+                                    break;
+                                }
+
+                                if (AMS_UNLIKELY(R_FAILED(pIntf->mLatestReadReport.res)))
+                                {
+                                    DEBUG(
+                                        "[DriverThread::Driver] Latest read failed for adapter interface %u: { .res = %x, .requestedSize = %x, .transferredSize = %x }\n",
+                                        pUserData->mIntfId, pIntf->mLatestReadReport.res, pIntf->mLatestReadReport.requestedSize, pIntf->mLatestReadReport.transferredSize
+                                    );
+                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mReadEpSession));
+                                }
+                                else
+                                {
+                                    R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(&pIntf->mReadEpSession, MemoryForInterface(pUserData->mIntfId, true), 37, 0, &dummy));
+                                }
+
                                 break;
                             case ProxyInterfaceImpl::CompletionEventId::WriteEndpoint:
-                                /* Do nothing except request another write */
-                                *MemoryForInterface(pUserData->mIntfId, false) = 0x11;
-                                R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(&pIntf->mWriteEpSession, MemoryForInterface(pUserData->mIntfId, false), 5, 0, &dummy));
+                                /* TODO: Make this write request on-demand? Will take up less resources... */
+                                /* Do nothing except request another write, but only if the xfer was successful (an error here will cause a deadlock) */
+                                R_ABORT_UNLESS(usbHsEpGetXferReportFwd(&pIntf->mWriteEpSession, &pIntf->mLatestWriteReport, 1, &dummy));
+                                if (AMS_UNLIKELY(dummy != 1))
+                                {
+                                    DEBUG("[DriverThread::Driver] Unable to get xfer report for latest write for adapter interface %u, not-continuing write operations\n", pUserData->mIntfId);
+                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mWriteEpSession));
+                                    break;
+                                }
+
+                                if (AMS_UNLIKELY(R_FAILED(pIntf->mLatestWriteReport.res)))
+                                {
+                                    DEBUG(
+                                        "[DriverThread::Driver] Latest write failed for adapter interface %u: { .res = %x, .requestedSize = %x, .transferredSize = %x }\n",
+                                        pUserData->mIntfId, pIntf->mLatestWriteReport.res, pIntf->mLatestWriteReport.requestedSize, pIntf->mLatestWriteReport.transferredSize
+                                    );
+                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mWriteEpSession));
+                                }
+                                else
+                                {
+                                    *MemoryForInterface(pUserData->mIntfId, false) = 0x11;
+                                    R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(&pIntf->mWriteEpSession, MemoryForInterface(pUserData->mIntfId, false), 5, 0, &dummy));
+                                }
                                 break;
                             AMS_UNREACHABLE_DEFAULT_CASE();
                         }
@@ -414,7 +470,10 @@ namespace usb::gc
     )
     {
         if (size == 0)
+        {
+            DEBUG("[DriverThread::Api::ReadWithTransfer] Early exiting because a size of 0x0 was requested for transfer\n");
             return;
+        }
 
         ams::os::LockMutex(&g_TransferMutex);
 
@@ -443,8 +502,13 @@ namespace usb::gc
         size_t size
     )
     {
-        if (size == 0)
+        if (AMS_UNLIKELY(size == 0))
+        {
+            DEBUG("[DriverThread::Api::WriteWithTransfer] Early exiting because a size of 0x0 was requested for transfer\n");
             return;
+        }
+        /* I don't want to through any debug logs in this function unless it crashes, since this is run so frequently it would cause */
+        /* runtime performance issues if debug logging is enabled, so bad that it would likely impact test results */
 
         ams::os::LockMutex(&g_TransferMutex);
 
@@ -467,7 +531,9 @@ namespace usb::gc
 
     void Initialize()
     {
+        DEBUG("[DriverThread::Api::Initialize] Looking for transfer memory page\n");
         LocateTransferMemory();
+        DEBUG("[DriverThread::Api::Initialize] Transfer memory page found at %llx\n", g_TransferMemory);
         ams::os::InitializeMutex(&g_InterfaceMutex, false, 1);
         ams::os::InitializeEvent(&g_InterfaceUpdateRequested, false, ams::os::EventClearMode_ManualClear);
         ams::os::InitializeMutex(&g_TransferMutex, false, 1);
@@ -498,7 +564,8 @@ namespace usb::gc
         ams::os::LockMutex(&g_InterfaceMutex);
         bool AwaitingShutdown = false;
         size_t i;
-        for (i = 0; i < g_MaxSupportedAdapters; i++) {
+        for (i = 0; i < g_MaxSupportedAdapters; i++)
+        {
             if (!g_Interfaces[i].mIsAcquired) break;
             else if (g_Interfaces[i].mIsRequestShutdown) AwaitingShutdown = true;
         }
@@ -506,15 +573,24 @@ namespace usb::gc
         if (i == g_MaxSupportedAdapters)
         {
             ams::os::UnlockMutex(&g_InterfaceMutex);
-            if (!AwaitingShutdown)
+            if (AwaitingShutdown)
             {
+                DEBUG("[DriverThread::Api::OpenInterface] No available adatper spots found, but at least one is shutting down. Waiting for that to finish\n");
+            }
+            else
+            {
+                DEBUG("[DriverThread::Api::OpenInterface] No available adapter spots found, and none of them are shutting donw. Aborting\n");
                 AMS_ABORT("Too many adapters plugged in");
             }
             ams::os::SleepThread(ams::TimeSpan::FromMicroSeconds(100));
             return OpenInterface(ClientProcess, IfSession, pInterface);
         }
 
+        DEBUG("[DriverThread::Api::OpenInterface] Found available adapter slot %u, initializing adapter\n", i);
+
         g_Interfaces[i].Initialize(ClientProcess, IfSession, pInterface);
+
+        DEBUG("[DriverThread::Api::OpenInterface] Adapter %u initialized\n", i);
 
         ams::os::UnlockMutex(&g_InterfaceMutex);
         ams::os::SignalEvent(&g_InterfaceUpdateRequested);
@@ -531,7 +607,7 @@ namespace usb::gc
 
     void CloseInterface(InterfaceId id)
     {
-        AMS_ASSERT(id < g_MaxSupportedAdapters, "Invalid interface id");
+        AMS_ABORT_UNLESS(id < g_MaxSupportedAdapters, "Invalid interface id");
         /* There's no need to lock here, since we don't actually mutate any state we are only sending a message to the driver thread */
         g_Interfaces[id].mIsRequestShutdown = true;
         ams::os::SignalEvent(&g_InterfaceUpdateRequested);
@@ -539,7 +615,7 @@ namespace usb::gc
 
     void IntfAsyncTransfer(InterfaceId id, IntfAsyncXfer xfer)
     {
-        AMS_ASSERT(id < g_MaxSupportedAdapters, "Invalid interface id");
+        AMS_ABORT_UNLESS(id < g_MaxSupportedAdapters, "Invalid interface id");
 
         ProxyInterfaceImpl* pIntf = &g_Interfaces[id];
 
@@ -551,7 +627,12 @@ namespace usb::gc
         /* If it's an outbound write map & copy the buffer here */
         if ((xfer.bmRequestType & USB_ENDPOINT_IN) == 0)
         {
+            DEBUG("[DriverThread::Api::IntfAsyncTransfer] Async interface transfer requested with write, transferring memory to scratch region %u\n", id);
             ReadWithTransfer(pIntf->mClientProcess, xfer.mClientBuffer, g_AsyncXferScratch + (ams::os::MemoryPageSize * id), xfer.wValue);
+        }
+        else
+        {
+            DEBUG("[DriverThread::Api::IntfAsyncTransfer] Async interface transfer requested with read, no transfer will happen until request has completed %u\n", id);
         }
 
         R_ABORT_UNLESS(usbHsIfCtrlXferAsyncFwd(
@@ -565,21 +646,61 @@ namespace usb::gc
         ams::os::SignalEvent(&g_InterfaceUpdateRequested);
     }
 
-    void WritePacket(InterfaceId id, u64 buffer, size_t size)
+    void WritePacket(InterfaceId id, u64 buffer, size_t size, UsbHsXferReport* pReport)
     {
         /* If it's the initialization packet, just stub this and fire the event */
         if (size != 1)
         {
             u8* pWriteMemory = MemoryForInterface(id, false);
             ReadWithTransfer(g_Interfaces[id].mClientProcess, buffer, pWriteMemory, size);
+            const UsbHsXferReport* pLatest = &g_Interfaces[id].mLatestWriteReport;
+            if (AMS_UNLIKELY(pLatest->xferId == UINT32_MAX))
+            {
+                *pReport = (UsbHsXferReport){
+                    .xferId = 0,
+                    .res = 0,
+                    .requestedSize = (u32)size,
+                    .transferredSize = (u32)size,
+                    .id = 0
+                };
+            }
+            else
+            {
+                *pReport = *pLatest;
+            }
+        }
+        else
+        {
+            *pReport = (UsbHsXferReport){
+                .xferId = 0,
+                .res = 0,
+                .requestedSize = 1,
+                .transferredSize = 1,
+                .id = 0
+            };
         }
         R_ABORT_UNLESS(eventFire(&g_Interfaces[id].mExposedCompletionEvents[ProxyInterfaceImpl::CompletionEventId::WriteEndpoint]));
     }
 
-    void ReadPacket(InterfaceId id, u64 buffer, size_t size)
+    void ReadPacket(InterfaceId id, u64 buffer, size_t size, UsbHsXferReport* pReport)
     {
-        AMS_ASSERT(args.mId < g_MaxSupportedAdapters, "Invalid interface id");
+        AMS_ABORT_UNLESS(id < g_MaxSupportedAdapters, "Invalid interface id");
         WriteWithTransfer(g_Interfaces[id].mClientProcess, MemoryForInterface(id, true), buffer, size);
+        const UsbHsXferReport* pLatest = &g_Interfaces[id].mLatestReadReport;
+        if (AMS_UNLIKELY(pLatest->xferId == UINT32_MAX))
+        {
+            *pReport = (UsbHsXferReport){
+                .xferId = 0,
+                .res = 0,
+                .requestedSize = (u32)size,
+                .transferredSize = (u32)size,
+                .id = 0
+            };
+        }
+        else
+        {
+            *pReport = *pLatest;
+        }
         R_ABORT_UNLESS(eventFire(&g_Interfaces[id].mExposedCompletionEvents[ProxyInterfaceImpl::CompletionEventId::ReadEndpoint]));
     }
 }

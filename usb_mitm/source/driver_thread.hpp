@@ -45,7 +45,7 @@ namespace usb::gc
 
     /* Closes the interface to the GameCube adapter. */
     void CloseInterface(InterfaceId id);
-
+    
     /* Initializes an async transfer on the interface itself */
     /* This isn't necessary for the GameCube adapter, so it's possible this method is stubbed */
     void IntfAsyncTransfer(InterfaceId id, IntfAsyncXfer xfer);
@@ -54,10 +54,10 @@ namespace usb::gc
     /* Note that this method is non-blocking, and that the "queue" of packets to the GC adapter */
     /* Is only one long. If this method is called again before the driver thread has had an opportunity */
     /* to write the previous packet, then the previous packet gets discarded. */
-    void WritePacket(InterfaceId id, u64 buffer, size_t size);
+    void WritePacket(InterfaceId id, u64 buffer, size_t size, UsbHsXferReport* pReport);
 
     /* Gets the last packet that was read from the GameCube controller, and writes it to the specified pointer */
-    void ReadPacket(InterfaceId id, u64 buffer, size_t size);
+    void ReadPacket(InterfaceId id, u64 buffer, size_t size, UsbHsXferReport* pReport);
 
     void ReadWithTransfer(Handle ForeignProcess, uintptr_t ForeignMemory, void* LocalMemory, size_t Size);
     void WriteWithTransfer(Handle ForeignProcess, void* LocalMemory, uintptr_t ForeignMemory, size_t Size);
