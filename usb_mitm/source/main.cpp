@@ -3,6 +3,7 @@
 #include <stratosphere.hpp>
 #include "driver_thread.hpp"
 #include "usbmitm_module.hpp"
+#include "usb_gc_service.hpp"
 #include "usb_sysmodule_patch.hpp"
 
 namespace ams::init
@@ -41,8 +42,10 @@ namespace ams
 
         mitm::usb::Initialize();
         mitm::usb::Launch();
+        usb::gc::Launch();
         ::usb::gc::Initialize();
         ::usb::gc::WaitProcess();
+        usb::gc::WaitFinish();
         mitm::usb::WaitFinished();
     }
 }

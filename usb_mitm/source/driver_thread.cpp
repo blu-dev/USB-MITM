@@ -133,8 +133,8 @@ namespace usb::gc
                 svcCloseHandle(mCompletionEvents[CompletionEventId::ReadEndpoint]);
                 svcCloseHandle(mCompletionEvents[CompletionEventId::Interface]);
 
-                // R_ABORT_UNLESS(usbHsEpCloseFwd(&mWriteEpSession));
-                // R_ABORT_UNLESS(usbHsEpCloseFwd(&mReadEpSession));
+                R_ABORT_UNLESS(usbHsEpCloseFwd(&mWriteEpSession));
+                R_ABORT_UNLESS(usbHsEpCloseFwd(&mReadEpSession));
 
                 serviceClose(&mWriteEpSession);
                 serviceClose(&mReadEpSession);
@@ -371,7 +371,7 @@ namespace usb::gc
 
                                 if ((pRequest->bmRequestType & USB_ENDPOINT_IN) != 0)
                                 {
-                                    WriteWithTransfer(pIntf->mClientProcess, g_AsyncXferScratch + (ams::os::MemoryPageSize * pUserData->mIntfId), pRequest->mClientBuffer, pRequest->wValue);
+                                    WriteWithTransfer(pIntf->mClientProcess, g_AsyncXferScratch + (ams::os::MemoryPageSize * pUserData->mIntfId), pRequest->mClientBuffer, PAGE_ALIGN(pRequest->wValue));
                                 }
 
                                 R_ABORT_UNLESS(eventFire(&pIntf->mExposedCompletionEvents[pUserData->mEventId]));
@@ -383,7 +383,6 @@ namespace usb::gc
                                 if (AMS_UNLIKELY(dummy != 1))
                                 {
                                     DEBUG("[DriverThread::Driver] Unable to get xfer report for latest read for adapter interface %u, not-continuing read operations\n", pUserData->mIntfId);
-                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mReadEpSession));
                                     break;
                                 }
 
@@ -393,7 +392,6 @@ namespace usb::gc
                                         "[DriverThread::Driver] Latest read failed for adapter interface %u: { .res = %x, .requestedSize = %x, .transferredSize = %x }\n",
                                         pUserData->mIntfId, pIntf->mLatestReadReport.res, pIntf->mLatestReadReport.requestedSize, pIntf->mLatestReadReport.transferredSize
                                     );
-                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mReadEpSession));
                                 }
                                 else
                                 {
@@ -408,7 +406,6 @@ namespace usb::gc
                                 if (AMS_UNLIKELY(dummy != 1))
                                 {
                                     DEBUG("[DriverThread::Driver] Unable to get xfer report for latest write for adapter interface %u, not-continuing write operations\n", pUserData->mIntfId);
-                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mWriteEpSession));
                                     break;
                                 }
 
@@ -418,7 +415,6 @@ namespace usb::gc
                                         "[DriverThread::Driver] Latest write failed for adapter interface %u: { .res = %x, .requestedSize = %x, .transferredSize = %x }\n",
                                         pUserData->mIntfId, pIntf->mLatestWriteReport.res, pIntf->mLatestWriteReport.requestedSize, pIntf->mLatestWriteReport.transferredSize
                                     );
-                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mWriteEpSession));
                                 }
                                 else
                                 {
@@ -628,7 +624,7 @@ namespace usb::gc
         if ((xfer.bmRequestType & USB_ENDPOINT_IN) == 0)
         {
             DEBUG("[DriverThread::Api::IntfAsyncTransfer] Async interface transfer requested with write, transferring memory to scratch region %u\n", id);
-            ReadWithTransfer(pIntf->mClientProcess, xfer.mClientBuffer, g_AsyncXferScratch + (ams::os::MemoryPageSize * id), xfer.wValue);
+            ReadWithTransfer(pIntf->mClientProcess, xfer.mClientBuffer, g_AsyncXferScratch + (ams::os::MemoryPageSize * id), PAGE_ALIGN(xfer.wValue));
         }
         else
         {
@@ -702,5 +698,33 @@ namespace usb::gc
             *pReport = *pLatest;
         }
         R_ABORT_UNLESS(eventFire(&g_Interfaces[id].mExposedCompletionEvents[ProxyInterfaceImpl::CompletionEventId::ReadEndpoint]));
+    }
+
+    uint32_t GetAdapterPacketStateForUsbGc(
+        uint8_t* pBytes,
+        size_t Size
+    )
+    {
+        uint32_t NumAdapters = 0;
+        for (u32 i = 0; i < g_MaxSupportedAdapters; i++)
+        {
+            if (Size < 38)
+                break;
+
+            if (g_Interfaces[i].mIsAcquired)
+            {
+                NumAdapters++;
+                u8* pAdapterMem = MemoryForInterface(i, true); 
+                pBytes[0] = (u8)i;
+                for (size_t j = 0; j < 37; j++)
+                {
+                    pBytes[j + 1] = pAdapterMem[j];
+                }
+                Size -= 38;
+                pBytes += 38;
+            }
+        }
+
+        return NumAdapters;
     }
 }

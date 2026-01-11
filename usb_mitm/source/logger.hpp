@@ -6,7 +6,7 @@
 #include <mutex>
 #include <source_location>
 
-#ifndef RELEASE
+#ifdef RELEASE
 #define DEBUG(...) ::usb::util::Log(__VA_ARGS__)
 #else
 #define DEBUG(...) AMS_UNUSED(__VA_ARGS__)

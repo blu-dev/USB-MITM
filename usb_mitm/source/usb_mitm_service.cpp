@@ -164,7 +164,13 @@ namespace ams::mitm::usb
     Result UsbMitmIfSession::GetCtrlXferReport(const sf::OutBuffer &out)
     {
         DEBUG("UsbMitmIfSession[%u]::GetCtrlXferReport(): { .res = %x, .requestedSize = %x, .transferredSize = %x }\n", mProxy.mId, mFakedReport.res, mFakedReport.requestedSize, mFakedReport.transferredSize);
+        if (mFakedReport.res != 0)
+        {
+            mFakedReport.res = 0;
+            mFakedReport.transferredSize = mFakedReport.requestedSize;
+        }
         *reinterpret_cast<UsbHsXferReport*>(out.GetPointer()) = mFakedReport;
+
         R_SUCCEED();
     }
     Result UsbMitmIfSession::ResetDevice()

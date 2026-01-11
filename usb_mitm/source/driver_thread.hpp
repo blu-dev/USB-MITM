@@ -61,4 +61,9 @@ namespace usb::gc
 
     void ReadWithTransfer(Handle ForeignProcess, uintptr_t ForeignMemory, void* LocalMemory, size_t Size);
     void WriteWithTransfer(Handle ForeignProcess, void* LocalMemory, uintptr_t ForeignMemory, size_t Size);
+
+    uint32_t GetAdapterPacketStateForUsbGc(
+        uint8_t* pBytes,
+        size_t Size
+    );
 }
