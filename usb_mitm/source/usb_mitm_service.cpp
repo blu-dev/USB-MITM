@@ -1,5 +1,6 @@
 #include "usb_mitm_service.hpp"
 #include "logger.hpp"
+#include "sniffer.hpp"
 #include "usb_shim.h"
 
 #define STUB_LOG() ::usb::util::Log("%s (stubbed)\n", __func__)
@@ -274,10 +275,9 @@ namespace ams::mitm::usb
 
         DEBUG("\tClient is attempting to acquire GameCube Adapter, redirecting request to usb:hs:a service with our process\n");
 
-        /* We need to trick the process into thinking that we are the session driver for a very brief moment */
         Service IfSession;
         res = usbHsAcquireUsbIfFwd(
-            &g_ProxyUsbService, &IfSession,
+            m_forward_service.get(), &IfSession,
             out1.GetPointer(), out1.GetSize(),
             out2.GetPointer(), out2.GetSize(),
             interfaceId
@@ -285,16 +285,31 @@ namespace ams::mitm::usb
 
         if (R_SUCCEEDED(res))
         {
-            DEBUG("\tSuccessfully acquired the GameCube Adapter via usb:hs:a service, sending device to driver thread\n");
-            ::usb::gc::ProxyInterface proxy = ::usb::gc::OpenInterface(mClientProcess, IfSession, &QueryInterfaces[i]);
-            out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, UsbMitmIfSession>(std::addressof(g_SfAllocator), mClientProcess, proxy));
-            R_SUCCEED();
+            out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, ams::usb::sniffer::UsbIfSessionSniffer>(std::addressof(g_SfAllocator), mClientProcess, IfSession));
         }
-        else
-        {
-            DEBUG("\tAcquiring USB device failed, forwarding to usb:hs session so that the device still works\n");
-            return sm::mitm::ResultShouldForwardToSession();
-        }
+
+        // /* We need to trick the process into thinking that we are the session driver for a very brief moment */
+        // Service IfSession;
+        // res = usbHsAcquireUsbIfFwd(
+        //     &g_ProxyUsbService, &IfSession,
+        //     out1.GetPointer(), out1.GetSize(),
+        //     out2.GetPointer(), out2.GetSize(),
+        //     interfaceId
+        // );
+
+        // if (R_SUCCEEDED(res))
+        // {
+        //     DEBUG("\tSuccessfully acquired the GameCube Adapter via usb:hs:a service, sending device to driver thread\n");
+        //     ::usb::gc::ProxyInterface proxy = ::usb::gc::OpenInterface(mClientProcess, IfSession, &QueryInterfaces[i]);
+        //     out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, UsbMitmIfSession>(std::addressof(g_SfAllocator), mClientProcess, proxy));
+        //     R_SUCCEED();
+        // }
+        // else
+        // {
+        //     DEBUG("\tAcquiring USB device failed, forwarding to usb:hs session so that the device still works\n");
+        //     return sm::mitm::ResultShouldForwardToSession();
+        // }
+        return res;
     }
 
     void Initialize() {
