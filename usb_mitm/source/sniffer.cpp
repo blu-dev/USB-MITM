@@ -347,7 +347,7 @@ namespace ams::usb::sniffer
         {
             out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientEpSession, UsbEpSessionSniffer>(
                 std::addressof(g_SfAllocator),
-                mClientProcess, EpSession, pSniffer, epDirection == 2
+                mClientProcess, EpSession, pSniffer, epDirection == 1
             ));
         }
 

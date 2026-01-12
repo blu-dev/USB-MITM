@@ -392,6 +392,7 @@ namespace usb::gc
                                         "[DriverThread::Driver] Latest read failed for adapter interface %u: { .res = %x, .requestedSize = %x, .transferredSize = %x }\n",
                                         pUserData->mIntfId, pIntf->mLatestReadReport.res, pIntf->mLatestReadReport.requestedSize, pIntf->mLatestReadReport.transferredSize
                                     );
+                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mReadEpSession));
                                 }
                                 else
                                 {
@@ -415,11 +416,12 @@ namespace usb::gc
                                         "[DriverThread::Driver] Latest write failed for adapter interface %u: { .res = %x, .requestedSize = %x, .transferredSize = %x }\n",
                                         pUserData->mIntfId, pIntf->mLatestWriteReport.res, pIntf->mLatestWriteReport.requestedSize, pIntf->mLatestWriteReport.transferredSize
                                     );
+                                    R_ABORT_UNLESS(usbHsEpCloseFwd(&pIntf->mWriteEpSession));
                                 }
                                 else
                                 {
-                                    *MemoryForInterface(pUserData->mIntfId, false) = 0x11;
-                                    R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(&pIntf->mWriteEpSession, MemoryForInterface(pUserData->mIntfId, false), 5, 0, &dummy));
+                                    // *MemoryForInterface(pUserData->mIntfId, false) = 0x11;
+                                    // R_ABORT_UNLESS(usbHsEpPostBufferAsyncFwd(&pIntf->mWriteEpSession, MemoryForInterface(pUserData->mIntfId, false), 5, 0, &dummy));
                                 }
                                 break;
                             AMS_UNREACHABLE_DEFAULT_CASE();
