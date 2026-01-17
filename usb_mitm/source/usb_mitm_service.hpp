@@ -1,7 +1,6 @@
 #pragma once
 #include <switch.h>
 #include <stratosphere.hpp>
-#include "driver_thread.hpp"
 #include "logger.hpp"
 #include "gc_interface.hpp"
 

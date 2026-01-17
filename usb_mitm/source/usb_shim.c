@@ -1,3 +1,9 @@
+/** This file contains redefinitions of the usbHs* service methods provided by libnx
+ * 
+ * This method redefines them so that we can have precise control over the services used. It also implements a few not provided
+ * by libnx, since they are otherwise unnecessary for custom processes.
+ */
+
 #include "usb_shim.h"
 
 Result _usbHsCmdNoIO(Service* srv, u64 cmd_id) {

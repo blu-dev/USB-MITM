@@ -2,7 +2,6 @@
 #include <switch.h>
 #include <stratosphere.hpp>
 #include "sniffer.hpp"
-#include "driver_thread.hpp"
 #include "usbmitm_module.hpp"
 #include "usb_gc_service.hpp"
 #include "usb_sysmodule_patch.hpp"

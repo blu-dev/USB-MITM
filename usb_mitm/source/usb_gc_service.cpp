@@ -1,5 +1,4 @@
 #include "usb_gc_service.hpp"
-#include "driver_thread.hpp"
 #include "gc_interface.hpp"
 
 namespace ams::usb::gc
