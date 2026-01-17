@@ -124,9 +124,9 @@ namespace ams::mitm::usb::sysmodule_patch
         int32_t imm26 = pPatch->mInstructionPatchOffset / 4;
         /* imm26 is a signed number, so here we are checking that it is both unsigned and that it does not overlap */
         /* with the opcode region */
-        AMS_ABORT_UNLESS((imm26 & 0xFE000000) != 0, "Instruction patch offset is too large");
+        AMS_ABORT_UNLESS((imm26 & 0xFE000000) == 0, "Instruction patch offset is too large");
 
-        uint32_t instruction = ((uint32_t)-imm26) | 0x94000000;
+        uint32_t instruction = (((uint32_t)-imm26) & 0x3FFFFFF) | 0x94000000;
 
         /* Step 6: Patch the process memory */
         /* NOTE: This is an extremely unsafe implementation that patches the region of .text used for the entrypoint */

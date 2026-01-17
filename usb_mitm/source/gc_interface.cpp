@@ -160,11 +160,6 @@ namespace ams::usb::gc
                 /* instead we send it in the PostBufferAsync request itself */
                 R_ABORT_UNLESS(usbHsEpGetXferReportFwd(&this->mReadEndpoint, &report, 1, &dummy));
 
-                if (dummy != 1)
-                {
-                    R_ABORT_UNLESS(0x234567);
-                }
-
                 if (report.res == 0)
                 {
                     /* If it was a success, then simply queue another read */
@@ -172,7 +167,7 @@ namespace ams::usb::gc
                         &this->mReadEndpoint, this->mReadXferPage, 0x25, 0, &dummy
                     ));
                 }
-                else if (report.res == 0x3228c)
+                else if (report.res == 0x3228c || report.res == 0x25a8c)
                 {
                     /* If it's this result code, then we need to break out of our steady state loop */
                     /* And wait for the adapter to shut down */
@@ -199,7 +194,7 @@ namespace ams::usb::gc
                     /* If it was a success, fire off the event */
                     R_ABORT_UNLESS(eventFire(&this->mWriteCompletedEventFwd));
                 }
-                else if (report.res == 0x3228c)
+                else if (report.res == 0x3228c || report.res == 0x25a8c)
                 {
                     break;
                 }
@@ -210,7 +205,7 @@ namespace ams::usb::gc
             }
             else
             {
-                R_ABORT_UNLESS(0x123456);
+                AMS_ABORT("Unreachable code path entered");
             }
         }
 
