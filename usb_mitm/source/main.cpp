@@ -38,16 +38,22 @@ namespace ams
     void Main()
     {
         R_ABORT_UNLESS(smInitialize());
-        ::usb::util::Log("Hello World\n");
         mitm::usb::sysmodule_patch::PatchUsbService();
 
         usb::sniffer::Initialize();       
-        mitm::usb::Initialize();
         mitm::usb::Launch();
+        mitm::usb::Initialize();
         usb::gc::Launch();
-        ::usb::gc::Initialize();
-        ::usb::gc::WaitProcess();
+
+        ams::usb::gc::g_GameCubeDriver1.Initialize(ams::usb::gc::GameCubeDriverId::One);
+        ams::usb::gc::g_GameCubeDriver2.Initialize(ams::usb::gc::GameCubeDriverId::Two);
+
+        ams::usb::gc::g_GameCubeDriver1.Finalize();
+        ams::usb::gc::g_GameCubeDriver2.Finalize();
+
         usb::gc::WaitFinish();
         mitm::usb::WaitFinished();
+
+
     }
 }

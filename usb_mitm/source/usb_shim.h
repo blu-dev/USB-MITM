@@ -36,6 +36,10 @@ extern "C"
     /* USB Service API */
     Result usbHsQueryAllInterfacesFwd(Service *s, const UsbHsInterfaceFilter *filter, UsbHsInterface *out, size_t count, s32 *total_out);
     Result usbHsQueryAvailableInterfacesFwd(Service *s, const UsbHsInterfaceFilter *filter, UsbHsInterface *out, size_t count, s32 *total_out);
+    Result usbHsQueryAcquiredInterfacesFwd(Service *s, UsbHsInterface *out, size_t count, s32 *total_out);
+    Result usbHsCreateInterfaceAvailableEventFwd(Service *s, const UsbHsInterfaceFilter *filter, u8 id, Handle *h);
+    Result usbHsDestroyInterfaceAvailableEventFwd(Service *s, u8 id);
+    Result usbHsGetInterfaceStateChangeEventFwd(Service *s, Handle *h);
     Result usbHsAcquireUsbIfFwd(Service *s, Service* outService, void* out1, size_t count1, void* out2, size_t count2, u32 interfaceId);
 
 #ifdef __cplusplus

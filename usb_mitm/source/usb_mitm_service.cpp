@@ -18,6 +18,64 @@ namespace ams::mitm::usb {
         constinit sf::ExpHeapAllocator g_SfAllocator = {};
 
         static ::Service g_ProxyUsbService;
+
+        
+        alignas(os::MemoryPageSize) u8 g_MuxerThreadStack[os::MemoryPageSize];
+        static os::ThreadType g_MuxerThread;
+        Handle g_ProxyStateChangeEvent = INVALID_HANDLE;
+        Handle g_ClientStateChangeEvent = INVALID_HANDLE;
+        Handle g_InterfaceAvailableEvent = INVALID_HANDLE;
+        Event g_ForwardStateChangeEvent;
+        Event g_ForwardInterfaceAvailableEvent;
+        constexpr s32 g_MuxerThreadPriority = -11;
+
+        void MuxerThreadFunction(void*)
+        {
+            os::MultiWaitType waiter;
+            os::MultiWaitHolderType proxySignaled;
+            os::MultiWaitHolderType clientSignaled;
+            os::MultiWaitHolderType interfaceSignaled;
+
+            while ((g_ClientStateChangeEvent == INVALID_HANDLE) || (g_ProxyStateChangeEvent == INVALID_HANDLE) || (g_InterfaceAvailableEvent == INVALID_HANDLE))
+            {
+                os::SleepThread(TimeSpan::FromMilliSeconds(10));
+            }
+
+            os::InitializeMultiWait(&waiter);
+            os::InitializeMultiWaitHolder(&proxySignaled, g_ProxyStateChangeEvent);
+            os::InitializeMultiWaitHolder(&clientSignaled, g_ClientStateChangeEvent);
+            os::InitializeMultiWaitHolder(&interfaceSignaled, g_InterfaceAvailableEvent);
+            os::LinkMultiWaitHolder(&waiter, &proxySignaled);
+            os::LinkMultiWaitHolder(&waiter, &clientSignaled);
+            os::LinkMultiWaitHolder(&waiter, &interfaceSignaled);
+
+            while (true)
+            {
+                os::MultiWaitHolderType* pSignaled = os::WaitAny(&waiter);
+                if (pSignaled == &proxySignaled)
+                {
+                    DEBUG("Proxy interface state changed\n");
+                    R_ABORT_UNLESS(eventFire(&g_ForwardStateChangeEvent));
+                    R_ABORT_UNLESS(svc::ResetSignal(g_ProxyStateChangeEvent));
+                }
+                else if (pSignaled == &clientSignaled)
+                {
+                    DEBUG("Client interface state changed\n");
+                    R_ABORT_UNLESS(eventFire(&g_ForwardStateChangeEvent));
+                    svc::ResetSignal(g_ClientStateChangeEvent);
+                }
+                else if (pSignaled == &interfaceSignaled)
+                {
+                    DEBUG("New interface available\n");
+                    R_ABORT_UNLESS(eventFire(&g_ForwardInterfaceAvailableEvent));
+                    R_ABORT_UNLESS(svc::ResetSignal(g_InterfaceAvailableEvent));
+                }
+                else
+                {
+                    AMS_ABORT("Unreachable code path entered");
+                }
+            }
+        }
     }
 }
 
@@ -30,19 +88,34 @@ namespace ams::mitm::usb
 
     Result UsbMitmEpSession::ReOpen()
     {
-        STUB_LOG();
+        this->mIsClosed = false;
         R_SUCCEED();
     }
 
     Result UsbMitmEpSession::Close()
     {
-        STUB_LOG();
-        R_SUCCEED();
+        this->mIsClosed = true;
+        if (this->mIsWriteEndpoint)
+        {
+            return this->mpDriver->CloseWrite();
+        }
+        else
+        {
+            return this->mpDriver->CloseRead();
+        }
+        // R_SUCCEED();
     }
 
     Result UsbMitmEpSession::GetCompletionEvent(sf::OutCopyHandle out)
     {
-        out.SetValue(this->mCompletionEvent, false);
+        if (this->mIsWriteEndpoint)
+        {
+            out.SetValue(this->mpDriver->WriteEvent(), false);
+        }
+        else
+        {
+            out.SetValue(this->mpDriver->ReadEvent(), false);
+        }
         R_SUCCEED();
     }
 
@@ -57,13 +130,13 @@ namespace ams::mitm::usb
         AMS_UNUSED(id);
 
         xferId.SetValue(0);
-        if (this->mIsWriteEndpoint) 
+        if (this->mIsWriteEndpoint)
         {
-            ::usb::gc::WritePacket(mIntfId, buffer, size, &mReport);
+            this->mpDriver->WritePacket(buffer, size, &this->mReport);
         }
         else
         {
-            ::usb::gc::ReadPacket(mIntfId, buffer, size, &mReport);
+            this->mpDriver->ReadPacket(buffer, size, &this->mReport);
         }
 
         R_SUCCEED();
@@ -77,13 +150,8 @@ namespace ams::mitm::usb
         }
         else
         {
+            DEBUG("GetXferReport: {.res = %x, .reqSize = %x, .transSize = %x, .xferId = %x, .id = %llx}\n", this->mReport.res, this->mReport.requestedSize, this->mReport.transferredSize, this->mReport.xferId, this->mReport.id);
             *reinterpret_cast<UsbHsXferReport*>(out.GetPointer()) = mReport;
-            if (mReport.res == 0x3228c)
-            {
-                /* Official SW continues polling after the first failure, we're going to simulate the endpoint being closed */
-                mReport.res = 0x2608c;
-                mReport.transferredSize = 0;
-            }
         }
 
         count.SetValue(1);
@@ -98,9 +166,15 @@ namespace ams::mitm::usb
 
     Result UsbMitmEpSession::CreateSmmuSpace(u32 size, u64 buffer)
     {
-        /* This call was expected and I'm hoping that not fulfilling it won't matter */
-        AMS_UNUSED(size, buffer);
-        STUB_LOG();
+        AMS_UNUSED(size);
+        if (this->mIsWriteEndpoint)
+        {
+            this->mpDriver->MapWritePage(buffer);
+        }
+        else
+        {
+            this->mpDriver->MapReadPage(buffer);
+        }
         R_SUCCEED();
     }
 
@@ -115,14 +189,15 @@ namespace ams::mitm::usb
 namespace ams::mitm::usb
 {
     UsbMitmIfSession::~UsbMitmIfSession() {
-        DEBUG("UsbMitmIfSession[%u]::~UsbMitmIfSession()\n", mProxy.mId);
-        ::usb::gc::CloseInterface(mProxy.mId);
+        DEBUG("UsbMitmIfSession::~UsbMitmIfSession()\n");
+        this->mpDriver->Release();
+        serviceClose(this->mpProxySession);
+        free(this->mpProxySession);
     }
 
     Result UsbMitmIfSession::GetStateChangeEvent(sf::OutCopyHandle out)
     {
-        DEBUG("UsbMitmIfSession[%u]::GetStateChangeEvent()\n", mProxy.mId);
-        out.SetValue(mProxy.mIfStateChangeEvent, false);
+        out.SetValue(this->mpDriver->InterfaceChangeEvent(), false);
         R_SUCCEED();
     }
     Result UsbMitmIfSession::SetInterface(const sf::OutBuffer &out, u8 id)
@@ -147,31 +222,32 @@ namespace ams::mitm::usb
     }
     Result UsbMitmIfSession::CtrlXferAsync(u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, u16 wLength, u64 buffer)
     {
-        DEBUG("UsbMitmIfSession[%u]::CtrlXferAsync(%x, %x, %x, %x, %x, %llx):\n", mProxy.mId, bmRequestType, bRequest, wValue, wIndex, wLength, buffer);
+        // DEBUG("UsbMitmIfSession::CtrlXferAsync(%x, %x, %x, %x, %x, %llx):\n", mProxy.mId, bmRequestType, bRequest, wValue, wIndex, wLength, buffer);
 
-        ::usb::gc::IntfAsyncTransfer(mProxy.mId, {
-            .mpReport = &mFakedReport,
-            .mClientBuffer = buffer,
-            .bmRequestType = bmRequestType,
-            .bRequest = bRequest,
-            .wValue = wValue,
-            .wIndex = wIndex,
-            .wLength = wLength
-        });
+        this->mpDriver->ControlTransfer(
+            bmRequestType,
+            bRequest,
+            wValue,
+            wIndex,
+            wLength,
+            buffer,
+            &this->mLastReport
+        );
 
         R_SUCCEED();
     }
     Result UsbMitmIfSession::GetCtrlXferCompletionEvent(sf::OutCopyHandle out)
     {
-        DEBUG("UsbMitmIfSession[%u]::GetCtrlXferCompletionEvent()\n", mProxy.mId);
-        out.SetValue(mProxy.mCtrlXferCompletionEvent, false);
+        // DEBUG("UsbMitmIfSession[%u]::GetCtrlXferCompletionEvent()\n", mProxy.mId);
+        out.SetValue(this->mpDriver->InterfaceEvent(), false);
+        // out.SetValue(mProxy.mCtrlXferCompletionEvent, false);
         R_SUCCEED();
     }
     Result UsbMitmIfSession::GetCtrlXferReport(const sf::OutBuffer &out)
     {
-        DEBUG("UsbMitmIfSession[%u]::GetCtrlXferReport(): { .res = %x, .requestedSize = %x, .transferredSize = %x }\n", mProxy.mId, mFakedReport.res, mFakedReport.requestedSize, mFakedReport.transferredSize);
-        
-        *reinterpret_cast<UsbHsXferReport*>(out.GetPointer()) = mFakedReport;
+        // DEBUG("UsbMitmIfSession[%u]::GetCtrlXferReport(): { .res = %x, .requestedSize = %x, .transferredSize = %x }\n", mProxy.mId, mFakedReport.res, mFakedReport.requestedSize, mFakedReport.transferredSize);
+        DEBUG("AsyncXferReport: {.res = %x, .reqSize = %x, .transSize = %x, .xferId = %x, .id = %llx}\n", this->mLastReport.res, this->mLastReport.requestedSize, this->mLastReport.transferredSize, this->mLastReport.xferId, this->mLastReport.id);
+        *reinterpret_cast<UsbHsXferReport*>(out.GetPointer()) = this->mLastReport;
 
         R_SUCCEED();
     }
@@ -181,21 +257,21 @@ namespace ams::mitm::usb
     }
     Result UsbMitmIfSession::OpenUsbEp(sf::Out<sf::SharedPointer<::ams::usb::IClientEpSession>> out_session, sf::Out<usb_endpoint_descriptor> out_desc, u16 maxUrbCount, u32 epType, u32 epNumber, u32 epDirection, u32 maxXferSize)
     {
-        DEBUG("UsbMitmIfSession[%u]::OpenUsb(%x, %x, %x, %x, %x):\n", mProxy.mId, maxUrbCount, epType, epNumber, epDirection, maxXferSize);
+        // DEBUG("UsbMitmIfSession[%u]::OpenUsb(%x, %x, %x, %x, %x):\n", mProxy.mId, maxUrbCount, epType, epNumber, epDirection, maxXferSize);
         AMS_UNUSED(out_desc, maxUrbCount, epType, epNumber, epDirection, maxXferSize);
         bool IsWriteEndpoint = epDirection == 1;
-        if (IsWriteEndpoint)
-        {
-            DEBUG("\tOpening write endpoint to GameCube adapter %u\n", mProxy.mId);
-        }
-        else
-        {
-            DEBUG("\tOpening read endpoint to GameCube adapter %u\n", mProxy.mId);
-        }
+        // if (IsWriteEndpoint)
+        // {
+        //     DEBUG("\tOpening write endpoint to GameCube adapter %u\n", mProxy.mId);
+        // }
+        // else
+        // {
+        //     DEBUG("\tOpening read endpoint to GameCube adapter %u\n", mProxy.mId);
+        // }
 
         out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientEpSession, UsbMitmEpSession>(
             std::addressof(g_SfAllocator),
-            mClientProcess, mProxy.mId, IsWriteEndpoint ? mProxy.mWritePostBufferCompletionEvent : mProxy.mReadPostBufferCompletionEvent, IsWriteEndpoint
+            mpDriver, IsWriteEndpoint
         ));
         R_SUCCEED();
     }
@@ -236,10 +312,156 @@ namespace ams::mitm::usb
         R_ABORT_UNLESS(ams::pm::dmnt::AtmosphereGetProcessInfo(&mClientProcess, &DummyLocation, &DummyStatus, c.process_id));
         DEBUG("\tAcquired process client info. Client handle is %x\n", mClientProcess);
         pmdmntExit();
+
+    }
+
+    Result UsbMitmService::QueryAllInterfaces(UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out)
+    {
+        AMS_UNUSED(out, total_out);
+        DEBUG("QueryAll { .Flags = %hx, .idVendor = %hx, .idProduct = %hx, .bcdDevice_Min = %hx, .bcdDevice_Max = %hx, .bDeviceClass = %x, .bDeviceSubClass = %x, .bDeviceProtocol = %x, .bInterfaceClass = %x, .bInterfaceSubClass = %x, .bInterfaceProtocol = %hx }\n", filter.Flags, filter.idVendor, filter.idProduct, filter.bcdDevice_Min, filter.bcdDevice_Max, filter.bDeviceClass, filter.bDeviceSubClass, filter.bDeviceProtocol, filter.bInterfaceClass, filter.bInterfaceSubClass, filter.bInterfaceProtocol);
+        return sm::mitm::ResultShouldForwardToSession();
+        // UsbHsInterface intfs[8];
+        // Result r = usbHsQueryAllInterfacesFwd(m_forward_service.get(), &filter, out.GetPointer(), out.GetSize(), total_out.GetPointer());
+        // for (s32 i = 0; i < total_out.GetValue(); i++)
+        // {
+        //     UsbHsInterface* intf = &out[i];
+        //     u16 product = intf->device_desc.idProduct;
+        //     u16 vendor = intf->device_desc.idVendor;
+        //     DEBUG("\tPID: %hx VID: %hx\n", product, vendor);
+        // }
+
+        // s32 ourCount = 0;
+        // R_TRY(usbHsQueryAllInterfacesFwd(&g_ProxyUsbService, &filter, intfs, 8, &ourCount));
+
+        // for (s32 i = 0; i < ourCount; i++)
+        // {
+        //     UsbHsInterface* intf = &out[i];
+        //     u16 product = intf->device_desc.idProduct;
+        //     u16 vendor = intf->device_desc.idVendor;
+        //     DEBUG("\t[PROXY] PID: %hx VID: %hx\n", product, vendor);  
+        // }
+
+        // UsbHsInterface QueryInterfaces[4];
+
+        // s32 NumOut;
+
+        // R_TRY(usbHsQueryAvailableInterfacesFwd(
+        //     m_forward_service.get(),
+        //     &GameCubeFilter,
+        //     QueryInterfaces,
+        //     4,
+        //     &NumOut
+        // ));
+
+        // for (s32 i = 0; i < NumOut; i++)
+        // {
+        //     UsbHsInterface* intf = &QueryInterfaces[i];
+        //     u16 product = intf->device_desc.idProduct;
+        //     u16 vendor = intf->device_desc.idVendor;
+        //     DEBUG("\t[PROXY-CUSTOM] PID: %hx VID: %hx\n", product, vendor);  
+        // }
+
+        // return r;
+    }
+    Result UsbMitmService::QueryAvailableInterfaces(UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out)
+    {
+        AMS_UNUSED(out, total_out);
+        DEBUG("QueryAvailable { .Flags = %hx, .idVendor = %hx, .idProduct = %hx, .bcdDevice_Min = %hx, .bcdDevice_Max = %hx, .bDeviceClass = %x, .bDeviceSubClass = %x, .bDeviceProtocol = %x, .bInterfaceClass = %x, .bInterfaceSubClass = %x, .bInterfaceProtocol = %hx }\n", filter.Flags, filter.idVendor, filter.idProduct, filter.bcdDevice_Min, filter.bcdDevice_Max, filter.bDeviceClass, filter.bDeviceSubClass, filter.bDeviceProtocol, filter.bInterfaceClass, filter.bInterfaceSubClass, filter.bInterfaceProtocol);
+        return sm::mitm::ResultShouldForwardToSession();
+        // UsbHsInterface intfs[8];
+        // Result r = usbHsQueryAvailableInterfacesFwd(m_forward_service.get(), &filter, out.GetPointer(), out.GetSize(), total_out.GetPointer());
+
+        // for (s32 i = 0; i < total_out.GetValue(); i++)
+        // {
+        //     UsbHsInterface* intf = &out[i];
+        //     u16 product = intf->device_desc.idProduct;
+        //     u16 vendor = intf->device_desc.idVendor;
+        //     DEBUG("\tPID: %hx VID: %hx\n", product, vendor);
+        // }
+
+        // s32 ourCount = 0;
+        // R_TRY(usbHsQueryAvailableInterfacesFwd(&g_ProxyUsbService, &filter, intfs, 8, &ourCount));
+
+        // for (s32 i = 0; i < ourCount; i++)
+        // {
+        //     UsbHsInterface* intf = &out[i];
+        //     u16 product = intf->device_desc.idProduct;
+        //     u16 vendor = intf->device_desc.idVendor;
+        //     DEBUG("\t[PROXY] PID: %hx VID: %hx\n", product, vendor);  
+        // }
+
+        // return r;
+    }
+    Result UsbMitmService::QueryAcquiredInterfaces(const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out)
+    {
+        AMS_UNUSED(out, total_out);
+        DEBUG("QueryAcquired");
+        return sm::mitm::ResultShouldForwardToSession();
+        // UsbHsInterface intfs[8];
+        // s32 count = 0;
+        // R_TRY(usbHsQueryAcquiredInterfacesFwd(m_forward_service.get(), &filter, intfs, 8, &count));
+
+        // for (s32 i = 0; i < count; i++)
+        // {
+        //     out[i] = intfs[i];
+        // }
+
+        // s32 ourCount = 0;
+        // R_TRY(usbHsQueryAcquiredInterfacesFwd(&g_ProxyUsbService, &filter, intfs, 8, &ourCount));
+
+        // for (s32 i = 0; i < ourCount; i++)
+        // {
+        //     out[i + count] = intfs[i];
+        // }
+
+        // total_out.SetValue(ourCount + count);
+
+        // for (s32 i = 0; i < total_out.GetValue(); i++)
+        // {
+        //     UsbHsInterface* intf = &out[i];
+        //     u16 product = intf->device_desc.idProduct;
+        //     u16 vendor = intf->device_desc.idVendor;
+        //     DEBUG("\tPID: %hx VID: %hx\n", product, vendor);
+        // }
+        // R_SUCCEED();
+    }
+
+    Result UsbMitmService::CreateInterfaceAvailableEvent(sf::OutCopyHandle out, u8 id, UsbHsInterfaceFilter filter)
+    {
+        // AMS_UNUSED(out, id, filter);
+        // DEBUG("CreateIntfAvailEvent { .Flags = %hx, .idVendor = %hx, .idProduct = %hx, .bcdDevice_Min = %hx, .bcdDevice_Max = %hx, .bDeviceClass = %x, .bDeviceSubClass = %x, .bDeviceProtocol = %x, .bInterfaceClass = %x, .bInterfaceSubClass = %x, .bInterfaceProtocol = %hx }\n", filter.Flags, filter.idVendor, filter.idProduct, filter.bcdDevice_Min, filter.bcdDevice_Max, filter.bDeviceClass, filter.bDeviceSubClass, filter.bDeviceProtocol, filter.bInterfaceClass, filter.bInterfaceSubClass, filter.bInterfaceProtocol);
+        // // return sm::mitm::ResultShouldForwardToSession();
+        Result r = usbHsCreateInterfaceAvailableEventFwd(&g_ProxyUsbService, &filter, id, &g_InterfaceAvailableEvent);
+        if (R_SUCCEEDED(r))
+        {
+            out.SetValue(g_ForwardInterfaceAvailableEvent.revent, false);
+        }
+        return r;
+        // return sm::mitm::ResultShouldForwardToSession();
+    }
+
+    Result UsbMitmService::DestroyInterfaceAvailableEvent(u8 id)
+    {
+        AMS_UNUSED(id);
+        DEBUG("DestroyIntfAvailEvent\n");
+        // return sm::mitm::ResultShouldForwardToSession();
+        return usbHsDestroyInterfaceAvailableEventFwd(m_forward_service.get(), id);
+    }
+
+    Result UsbMitmService::GetInterfaceStateChangeEvent(sf::OutCopyHandle out)
+    {
+        AMS_UNUSED(out);
+        // return sm::mitm::ResultShouldForwardToSession();
+        // DEBUG("GetIntfStateChangeEvent\n");
+        R_ABORT_UNLESS(usbHsGetInterfaceStateChangeEventFwd(m_forward_service.get(), &g_ClientStateChangeEvent));
+        out.SetValue(g_ForwardStateChangeEvent.revent, false);
+        R_SUCCEED();
     }
 
     Result UsbMitmService::AcquireUsbIf(const sf::OutMapAliasBuffer &out1, const sf::OutMapAliasBuffer &out2, sf::Out<sf::SharedPointer<::ams::usb::IClientIfSession>> out_session, u32 interfaceId)
     {
+        // AMS_UNUSED(out1, out2, out_session, interfaceId);
+        // return sm::mitm::ResultShouldForwardToSession();
         DEBUG("UsbMitmService::AcquireUsbIf()\n");
         UsbHsInterface QueryInterfaces[4];
 
@@ -275,7 +497,6 @@ namespace ams::mitm::usb
         }
 
         DEBUG("\tClient is attempting to acquire GameCube Adapter, redirecting request to usb:hs:a service with our process\n");
-
         // Service IfSession;
         // res = usbHsAcquireUsbIfFwd(
         //     m_forward_service.get(), &IfSession,
@@ -288,11 +509,12 @@ namespace ams::mitm::usb
         // {
         //     out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, ams::usb::sniffer::UsbIfSessionSniffer>(std::addressof(g_SfAllocator), mClientProcess, IfSession));
         // }
+        
+        // return res;
 
-        /* We need to trick the process into thinking that we are the session driver for a very brief moment */
-        Service IfSession;
+        Service* pIfSession = (Service*)malloc(sizeof(Service));
         res = usbHsAcquireUsbIfFwd(
-            &g_ProxyUsbService, &IfSession,
+            &g_ProxyUsbService, pIfSession,
             out1.GetPointer(), out1.GetSize(),
             out2.GetPointer(), out2.GetSize(),
             interfaceId
@@ -301,16 +523,24 @@ namespace ams::mitm::usb
         if (R_SUCCEEDED(res))
         {
             DEBUG("\tSuccessfully acquired the GameCube Adapter via usb:hs:a service, sending device to driver thread\n");
-            ::usb::gc::ProxyInterface proxy = ::usb::gc::OpenInterface(mClientProcess, IfSession, &QueryInterfaces[i]);
-            out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, UsbMitmIfSession>(std::addressof(g_SfAllocator), mClientProcess, proxy));
+            ams::usb::gc::GameCubeDriver* pDriver = &ams::usb::gc::g_GameCubeDriver1;
+            if (pDriver->IsInUse())
+            {
+                pDriver = &ams::usb::gc::g_GameCubeDriver2;
+                AMS_ABORT_UNLESS(!pDriver->IsInUse(), "Could not find an available driver");
+            }
+
+            pDriver->Acquire(mClientProcess, pIfSession);
+
+            out_session.SetValue(sf::ObjectFactory<sf::ExpHeapAllocator::Policy>::CreateSharedEmplaced<ams::usb::IClientIfSession, UsbMitmIfSession>(std::addressof(g_SfAllocator), mClientProcess, pIfSession, pDriver));
             R_SUCCEED();
         }
         else
         {
+            free(pIfSession);
             DEBUG("\tAcquiring USB device failed, forwarding to usb:hs session so that the device still works\n");
             return sm::mitm::ResultShouldForwardToSession();
         }
-        return res;
     }
 
     void Initialize() {
@@ -320,7 +550,7 @@ namespace ams::mitm::usb
         /* We connect to usb:hs:a since the GameCube adapter is only acquired through usb:hs when done in HID */
         /* This allows us to proxy the USB device packets */
         DEBUG("\tConnecting to the usb:hs:a service\n");
-        R_ABORT_UNLESS(ams::sm::GetServiceHandle(&UsbHandle, ams::sm::ServiceName::Encode("usb:hs:a")));
+        R_ABORT_UNLESS(ams::sm::GetServiceHandle(&UsbHandle, ams::sm::ServiceName::Encode("usb:hs")));
 
         serviceCreate(&g_ProxyUsbService, UsbHandle);
 
@@ -330,6 +560,10 @@ namespace ams::mitm::usb
         DEBUG("\tRegistering with usb:hs:a service\n");
         R_ABORT_UNLESS(serviceDispatch(&g_ProxyUsbService, 0, .in_num_handles = 1, .in_handles { CUR_PROCESS_HANDLE }));
 
+        R_ABORT_UNLESS(usbHsGetInterfaceStateChangeEventFwd(&g_ProxyUsbService, &g_ProxyStateChangeEvent));
+        R_ABORT_UNLESS(eventCreate(&g_ForwardStateChangeEvent, false));
+        R_ABORT_UNLESS(eventCreate(&g_ForwardInterfaceAvailableEvent, false));
+
         DEBUG("\tConnected and registered with usb:hs:a\n");
 
         g_HeapHandle = lmem::CreateExpHeap(g_HeapMemory, g_HeapMemorySize, lmem::CreateOption_ThreadSafe);
@@ -337,5 +571,9 @@ namespace ams::mitm::usb
         g_SfAllocator.Attach(g_HeapHandle);
 
         DEBUG("\tCreated heap for service objects\n");
+
+        R_ABORT_UNLESS(os::CreateThread(&g_MuxerThread, MuxerThreadFunction, nullptr, g_MuxerThreadStack, os::MemoryPageSize, g_MuxerThreadPriority));
+        os::SetThreadNamePointer(&g_MuxerThread, "usb::mitm::EventMuxerThread");
+        os::StartThread(&g_MuxerThread);
     }
 }

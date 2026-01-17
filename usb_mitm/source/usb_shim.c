@@ -206,7 +206,7 @@ Result usbHsQueryAllInterfacesFwd(Service *s, const UsbHsInterfaceFilter *filter
     s32 tmp = 0;
     Result rc = serviceDispatchInOut(s, 1, *filter, tmp,
                                      .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
-                                     .buffers = {{out, sizeof(UsbHsInterfaceInfo) * count}});
+                                     .buffers = {{out, count * sizeof(UsbHsInterface)}});
     if (R_SUCCEEDED(rc) && total_out != NULL)
     {
         *total_out = tmp;
@@ -219,12 +219,43 @@ Result usbHsQueryAvailableInterfacesFwd(Service *s, const UsbHsInterfaceFilter *
     s32 tmp = 0;
     Result rc = serviceDispatchInOut(s, 2, *filter, tmp,
                                      .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
-                                     .buffers = {{out, sizeof(UsbHsInterfaceInfo) * count}});
+                                     .buffers = {{out, count * sizeof(UsbHsInterface)}});
     if (R_SUCCEEDED(rc) && total_out != NULL)
     {
         *total_out = tmp;
     }
     return rc;
+}
+
+Result usbHsQueryAcquiredInterfacesFwd(Service *s, UsbHsInterface *out, size_t count, s32 *total_out)
+{
+    s32 tmp = 0;
+    Result rc = serviceDispatchOut(s, 3, tmp,
+                                     .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
+                                     .buffers = {{out, count * sizeof(UsbHsInterface)}});
+    if (R_SUCCEEDED(rc) && total_out != NULL)
+    {
+        *total_out = tmp;
+    }
+    return rc;
+}
+
+Result usbHsCreateInterfaceAvailableEventFwd(Service *s, const UsbHsInterfaceFilter *filter, u8 id, Handle *h)
+{
+    const struct {
+        u8 id;
+        u8 pad;
+        UsbHsInterfaceFilter filter;
+    } in = { id, 0, *filter };
+    return serviceDispatchIn(s, 4, in, .out_handle_attrs = {SfOutHandleAttr_HipcCopy }, .out_handles = h );
+}
+Result usbHsDestroyInterfaceAvailableEventFwd(Service *s, u8 id)
+{
+    return serviceDispatchIn(s, 5, id);
+}
+Result usbHsGetInterfaceStateChangeEventFwd(Service *s, Handle *h)
+{
+    return serviceDispatch(s, 6, .out_handle_attrs = { SfOutHandleAttr_HipcCopy}, .out_handles = h);
 }
 
 Result usbHsAcquireUsbIfFwd(Service *s, Service* outService, void* out1, size_t count1, void* out2, size_t count2, u32 interfaceId) {

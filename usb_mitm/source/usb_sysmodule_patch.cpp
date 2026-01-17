@@ -81,9 +81,8 @@ namespace ams::mitm::usb::sysmodule_patch
                 && (UsbMemInfo.permission != ams::svc::MemoryPermission_ReadExecute)
         )
         {
-            AMS_ASSERT(UsbMemInfo.base_address != 0, "Looped memory space searching for code");
-
             R_ABORT_UNLESS(ams::svc::QueryDebugProcessMemory(&UsbMemInfo, &UsbPageInfo, hUsbDebugProcess, UsbMemInfo.base_address + UsbMemInfo.size));
+            AMS_ASSERT(UsbMemInfo.base_address != 0, "Looped memory space searching for code");
         }
 
         /* Step 6: Patch the process memory */

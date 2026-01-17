@@ -3,9 +3,17 @@
 #include <stratosphere.hpp>
 #include "driver_thread.hpp"
 #include "logger.hpp"
+#include "gc_interface.hpp"
 
 #define AMS_USB_MITM_INTERFACE_INFO(C, H)                                                                                                                                                         \
+    AMS_SF_METHOD_INFO(C, H, 1, Result, QueryAllInterfaces, (UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out), (filter, out, total_out)) \
+    AMS_SF_METHOD_INFO(C, H, 2, Result, QueryAvailableInterfaces, (UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out), (filter, out, total_out)) \
+    AMS_SF_METHOD_INFO(C, H, 3, Result, QueryAcquiredInterfaces, (const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out), (out, total_out)) \
+    AMS_SF_METHOD_INFO(C, H, 4, Result, CreateInterfaceAvailableEvent, (sf::OutCopyHandle out, u8 id, UsbHsInterfaceFilter filter), (out, id, filter)) \
+    AMS_SF_METHOD_INFO(C, H, 5, Result, DestroyInterfaceAvailableEvent, (u8 id), (id)) \
+    AMS_SF_METHOD_INFO(C, H, 6, Result, GetInterfaceStateChangeEvent, (sf::OutCopyHandle out), (out)) \
     AMS_SF_METHOD_INFO(C, H, 7, Result, AcquireUsbIf, (const sf::OutMapAliasBuffer &out1, const sf::OutMapAliasBuffer &out2, sf::Out<sf::SharedPointer<::ams::usb::IClientIfSession>> out_session, u32 interfaceId), (out1, out2, out_session, interfaceId))
+
 
 #define AMS_USB_CLIENT_IF_INTERFACE_INFO(C, H) \
     AMS_SF_METHOD_INFO(C, H, 0, Result, GetStateChangeEvent, (sf::OutCopyHandle out), (out)) \
@@ -41,14 +49,13 @@ namespace ams::mitm::usb
     class UsbMitmEpSession
     {
     private: 
-        ams::os::NativeHandle mClientProcess;
-        ::usb::gc::InterfaceId mIntfId;
+        ams::usb::gc::GameCubeDriver* mpDriver;
         UsbHsXferReport mReport;
-        Handle mCompletionEvent;
         bool mIsWriteEndpoint;
+        bool mIsClosed;
     public:
-        UsbMitmEpSession(ams::os::NativeHandle client, ::usb::gc::InterfaceId id, Handle completion, bool is_write)
-            : mClientProcess(client), mIntfId(id), mCompletionEvent(completion), mIsWriteEndpoint(is_write)
+        UsbMitmEpSession(ams::usb::gc::GameCubeDriver* pDriver, bool is_write)
+            : mpDriver(pDriver), mIsWriteEndpoint(is_write), mIsClosed(false)
         {}
 
         ~UsbMitmEpSession();
@@ -69,11 +76,12 @@ namespace ams::mitm::usb
     class UsbMitmIfSession
     {
     private:
-        ams::os::NativeHandle mClientProcess;
-        ::usb::gc::ProxyInterface mProxy;
-        UsbHsXferReport mFakedReport;
+        Service* mpProxySession;
+        os::NativeHandle mClientProcess;
+        ams::usb::gc::GameCubeDriver* mpDriver;
+        UsbHsXferReport mLastReport;
     public:
-        UsbMitmIfSession(ams::os::NativeHandle client, ::usb::gc::ProxyInterface proxy) : mClientProcess(client), mProxy(proxy) {}
+        UsbMitmIfSession(os::NativeHandle client, Service* proxy, ams::usb::gc::GameCubeDriver* pDriver) : mpProxySession(proxy), mClientProcess(client), mpDriver(pDriver) {}
         ~UsbMitmIfSession();
 
         Result GetStateChangeEvent(sf::OutCopyHandle out);
@@ -107,8 +115,12 @@ namespace ams::mitm::usb
         }
 
     public:
-        Result QueryAllInterfaces(UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterfaceInfo> &out, sf::Out<s32> total_out);
-        Result QueryAvailableInterfaces(UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterfaceInfo> &out, sf::Out<s32> total_out);
+        Result QueryAllInterfaces(UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out);
+        Result QueryAvailableInterfaces(UsbHsInterfaceFilter filter, const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out);
+        Result QueryAcquiredInterfaces(const sf::OutMapAliasArray<UsbHsInterface> &out, sf::Out<s32> total_out);
+        Result CreateInterfaceAvailableEvent(sf::OutCopyHandle out, u8 id, UsbHsInterfaceFilter filter);
+        Result DestroyInterfaceAvailableEvent(u8 id);
+        Result GetInterfaceStateChangeEvent(sf::OutCopyHandle out);
         Result AcquireUsbIf(const sf::OutMapAliasBuffer &out1, const sf::OutMapAliasBuffer &out2, sf::Out<sf::SharedPointer<::ams::usb::IClientIfSession>> out_session, u32 interfaceId);
     };
 
